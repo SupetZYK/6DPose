@@ -10,17 +10,35 @@ namespace fs = std::experimental::filesystem;
 using namespace std;
 using namespace cv;
 
-void lchf_model::train(const std::vector<Linemod_feature> &feats, const std::vector<Info>& infos)
+// lchf_model
+Forest<Linemod_feature> lchf_model::train(const std::vector<Linemod_feature> &feats, const std::vector<Info>& infos)
 {
+    Forest<Linemod_feature> forest;
     forest.Train(feats, infos);
+    return forest;
 }
-
-std::vector<int> lchf_model::predict(const std::vector<Linemod_feature> &feats, Linemod_feature &f)
+std::vector<std::vector<int>> lchf_model::predict(const Forest<Linemod_feature>& forest, const std::vector<Linemod_feature> &templ_feats, const std::vector<Linemod_feature> &scene_feats)
 {
-    return forest.Predict(feats, f);
+    std::vector<std::vector<int>> scene_leafs;
+    for(auto& f: scene_feats){
+        auto leafs = forest.Predict(templ_feats, f);
+        scene_leafs.push_back(leafs);
+    }
+    return scene_leafs;
 }
 
-Forest<Linemod_feature> lchf_model::loadForest()
+void lchf_model::saveForest(Forest<Linemod_feature> &forest, std::string path){
+    fs::path dir(path);
+    fs::path file("forests");
+    auto full_path = dir / file;
+    fstream output(full_path.c_str(), ios::out | ios::trunc | ios::binary);
+    lchf::Forest forest_;
+    forest.write(&forest_);
+    if(!forest_.SerializeToOstream(&output)){
+        cerr << "Fail to write forests" << endl;
+    }
+}
+Forest<Linemod_feature> lchf_model::loadForest(std::string path)
 {
     fs::path file("forests");
     lchf::Forest forest_;
@@ -37,7 +55,24 @@ Forest<Linemod_feature> lchf_model::loadForest()
     return forest;
 }
 
-std::vector<Linemod_feature> lchf_model::loadFeatures()
+void lchf_model::saveFeatures(std::vector<Linemod_feature> &features, std::string path){
+    fs::path dir(path);
+    if(!features.empty())
+    {
+        fs::path file("features");
+        auto full_path = dir / file;
+        fstream output(full_path.c_str(), ios::out | ios::trunc | ios::binary);
+        lchf::Linemod_features fs;
+        for(auto& feature: features){
+            auto fs_ = fs.add_features();
+            feature.write(fs_);
+        }
+        if(!fs.SerializeToOstream(&output)){
+            cerr << "Fail to write features" << endl;
+        }
+    }
+}
+std::vector<Linemod_feature> lchf_model::loadFeatures(std::string path)
 {
     fs::path file("features");
     lchf::Linemod_features features;
@@ -57,9 +92,26 @@ std::vector<Linemod_feature> lchf_model::loadFeatures()
     return feats;
 }
 
-std::vector<Info> lchf_model::loadCluster_infos()
+void lchf_model::saveInfos(std::vector<Info> &cluster_infos, std::string path)
 {
-    fs::path file("cluster_infos");
+    fs::path dir(path);
+    {
+        fs::path file("infos");
+        auto full_path = dir / file;
+        fstream output(full_path.c_str(), ios::out | ios::trunc | ios::binary);
+        lchf::Infos infos;
+        for(auto& info: cluster_infos){
+            auto info_ = infos.add_info();
+            info.write(info_);
+        }
+        if(!infos.SerializeToOstream(&output)){
+            cerr << "Fail to write cluster infos" << endl;
+        }
+    }
+}
+std::vector<Info> lchf_model::loadInfos(std::string path)
+{
+    fs::path file("infos");
     lchf::Infos infos;
     fs::path dir(path);
     auto full_path = dir / file;
@@ -76,71 +128,7 @@ std::vector<Info> lchf_model::loadCluster_infos()
     return infos_;
 }
 
-void lchf_model::saveModel(Forest<Linemod_feature> &forest, std::vector<Linemod_feature> &features){
-    fs::path dir(path);
-    if(!features.empty()){
-        fs::path file("features");
-        auto full_path = dir / file;
-        fstream output(full_path.c_str(), ios::out | ios::trunc | ios::binary);
-        lchf::Linemod_features fs;
-        if(params.save_src){
-            for(auto& feature: features){
-                auto fs_ = fs.add_features();
-                feature.write(fs_, 1, 1);
-            }
-        }else if(params.save_all_embedding){
-            for(auto& feature: features){
-                auto fs_ = fs.add_features();
-                feature.write(fs_, 0, 1);
-            }
-        }else if(params.save_split_embedding){
-            vector<int> check_array(features.size(), 0);
-            for(auto& tree: forest.trees){
-                for(auto& idx: tree.id_non_leafnodes_){
-                    check_array[idx] = 1;
-                }
-            }
-            for(int i=0;i<check_array.size();i++){
-                auto fs_ = fs.add_features();
-                if(check_array[i]){
-                    features[i].write(fs_, 0, 1);
-                }
-            }
-        }
-        if(!fs.SerializeToOstream(&output)){
-            cerr << "Fail to write features" << endl;
-        }
-    }
-    {
-        fs::path file("forests");
-        auto full_path = dir / file;
-        fstream output(full_path.c_str(), ios::out | ios::trunc | ios::binary);
-        lchf::Forest forest_;
-        forest.write(&forest_);
-        if(!forest_.SerializeToOstream(&output)){
-            cerr << "Fail to write forests" << endl;
-        }
-    }
-}
-
-void lchf_model::saveInfos(std::vector<Info> &cluster_infos)
-{
-    fs::path dir(path);
-    {
-        fs::path file("cluster_infos");
-        auto full_path = dir / file;
-        fstream output(full_path.c_str(), ios::out | ios::trunc | ios::binary);
-        lchf::Infos infos;
-        for(auto& info: cluster_infos){
-            auto info_ = infos.add_info();
-            info.write(info_);
-        }
-        if(!infos.SerializeToOstream(&output)){
-            cerr << "Fail to write cluster infos" << endl;
-        }
-    }
-}
-
+// lchf_helper
 float lchf_helper::getMean(std::vector<float>& v){
     float sum = std::accumulate(v.begin(), v.end(), 0.0);
     float  mean = sum / v.size();
@@ -247,4 +235,55 @@ std::vector<size_t> lchf_helper::sort_indexes(const std::vector<T> &v) {
   std::sort(idx.begin(), idx.end(),
        [&v](size_t i1, size_t i2) {return v[i1] < v[i2];});
   return idx;
+}
+
+std::vector<std::map<int, std::vector<int>>> lchf_model::getLeaf_feats_map(const Forest<Linemod_feature> &forest)
+{
+    std::vector<std::map<int, std::vector<int>>> forest_leaf_map(forest.trees.size());
+    for(int i=0; i<forest.trees.size(); i++){
+        auto& tree = forest.trees[i];
+        auto& leaf_map = forest_leaf_map[i];
+        for(auto leaf: tree.id_leafnodes_){
+            leaf_map[leaf] = tree.nodes_[leaf].ind_feats;
+        }
+    }
+    return forest_leaf_map;
+}
+
+std::vector<Linemod_feature> lchf_model::get_feats_from_scene(Mat &rgb, Mat &depth, std::vector<std::vector<int> > &rois)
+{
+    assert(rois.size()>0);
+    assert(rois[0].size() == 5);
+
+    Linemod_feature whole_scene(rgb, depth);
+    whole_scene.constructResponse();
+
+    std::vector<Linemod_feature> feats;
+    for(auto& roi: rois){
+        Linemod_embedding embedding;
+        embedding.center_dep = roi[5];
+        {
+            std::vector<cv::Mat> rgb_response;
+            for(cv::Mat& res: whole_scene.embedding.rgb_response){
+                cv::Rect crop(roi[0], roi[1], roi[2], roi[3]);
+                cv::Mat res_roi = res(crop).clone();
+                rgb_response.push_back(res_roi);
+            }
+            embedding.rgb_response = rgb_response;
+        }
+        {
+            std::vector<cv::Mat> dep_response;
+            for(cv::Mat& res: whole_scene.embedding.dep_response){
+                cv::Rect crop(roi[0], roi[1], roi[2], roi[3]);
+                cv::Mat res_roi = res(crop).clone();
+                dep_response.push_back(res_roi);
+            }
+            embedding.dep_response = dep_response;
+        }
+        Linemod_feature feat;
+        feat.depth = depth(cv::Rect(roi[0], roi[1], roi[2], roi[3]));
+        feat.setEmbedding(embedding);
+        feats.push_back(feat);
+    }
+    return feats;
 }

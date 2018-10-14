@@ -6,7 +6,7 @@
 #include <opencv2/highgui/highgui.hpp>
 #include <iostream>
 #include "proto/serialization.pb.h"
-#include "global_params.h"
+
 class Info {
 public:
     cv::Mat rpy;
@@ -22,11 +22,11 @@ public:
     Linemod_embedding():
         weak_threshold(10.0f),
         strong_threshold(55.0f),
-        num_features(31),
+        num_features(15),
         distance_threshold(2000),
         difference_threshold(50),
         extract_threshold(2),
-        z_check(50){}
+        z_check(200){}
     float weak_threshold, strong_threshold;
     int num_features, distance_threshold, difference_threshold, extract_threshold;
     class element {
@@ -65,18 +65,20 @@ inline Linemod_embedding::Candidate::Candidate(int x, int y, int label, float _s
 class Linemod_feature {
 public:
     Linemod_feature(){}
-    Linemod_feature(cv::Mat rgb_, cv::Mat depth_, cv::Mat mask_=cv::Mat()):
-        rgb(rgb_), depth(depth_), mask(mask_){}
+    Linemod_feature(cv::Mat rgb_, cv::Mat depth_):
+        rgb(rgb_.clone()), depth(depth_.clone()){}
+    Linemod_feature(cv::Mat rgb_, cv::Mat depth_, cv::Mat mask_):
+        rgb(rgb_.clone()), depth(depth_.clone()), mask(mask_.clone()){}
     cv::Mat rgb, depth, mask;
     Linemod_embedding embedding;
+    std::string name = "linemod";
 
     bool constructEmbedding();
     bool constructResponse();
     void setEmbedding(Linemod_embedding& embedding_){embedding = std::move(embedding_);}
     float similarity(const Linemod_feature& other) const;
 
-    void write(lchf::Linemod_feature* f, bool save_src = 0
-            , bool save_embedding = 0);
+    void write(lchf::Linemod_feature* f);
     void read(const lchf::Linemod_feature &feature_);
 };
 

@@ -5,7 +5,7 @@
 #include <iostream>
 #include <cmath>
 #include <map>
-#include <unordered_map>
+
 namespace asp
 {
 namespace group_helper {
@@ -14,12 +14,19 @@ struct Vertex{
     int idx;
     int parent;
     int count=1;
+    std::vector<size_t> children;
+    std::vector<Eigen::Vector3f> worlds;
+    std::vector<Eigen::Vector3f> normals;
+
+    bool operator>(const Vertex& rhs) const{
+      return count > rhs.count;
+    }
 };
 struct Edge{
     int v1;
     int v2;
     int count = 1;
-    double weight = 0;
+    float weight = 0;
     bool operator<(const Edge& rhs) const{
       return weight < rhs.weight;
     }
@@ -31,6 +38,20 @@ int find(int idx, std::vector<Vertex>& vertices){
         u_parent = vertices[u_parent].parent;
     }
     return u_parent;
+}
+
+template <typename T>
+std::vector<size_t> sort_indexes(const std::vector<T> &v) {
+
+  // initialize original index locations
+  std::vector<size_t> idx(v.size());
+  iota(idx.begin(), idx.end(), 0);
+
+  // sort indexes based on comparing values in v
+  sort(idx.begin(), idx.end(),
+       [&v](size_t i1, size_t i2) {return v[i1] > v[i2];});
+
+  return idx;
 }
 }
 
@@ -160,7 +181,7 @@ int find(int idx, std::vector<Vertex>& vertices){
 		const DaspParameters opt = opt_in; // use local copy for higher performance
 		const unsigned width = img_rgb.width();
 		const unsigned height = img_d.height();
-		const Eigen::Vector2f cam_center = 0.5f * Eigen::Vector2f{ static_cast<float>(width), static_cast<float>(height) };
+        const Eigen::Vector2f cam_center = Eigen::Vector2f{ static_cast<float>(opt.cx), static_cast<float>(opt.cy) };
 
 		slimage::Image<Pixel<PixelRgbd>,1> img_data{width, height};
 		for(unsigned y=0, i=0; y<height; y++) {
@@ -222,13 +243,31 @@ int find(int idx, std::vector<Vertex>& vertices){
 		return sp;
 	}
 
-    slimage::Image<int,1> DsapGrouping(const slimage::Image3ub& img_rgb, const slimage::Image1ui16& img_d, const DaspParameters& opt_in){
-        auto seg = SuperpixelsDasp(img_rgb, img_d, opt_in);
-        auto R_seed = opt_in.radius;
+    slimage::Image<int,1> DsapGrouping(const slimage::Image3ub& img_rgb,
+                                       const slimage::Image1ui16& img_d,
+                                       const DaspParameters& opt_in,
+                                       slimage::Image3f& sli_world,
+                                       slimage::Image3f& sli_normal){
 
+        auto seg = SuperpixelsDasp(img_rgb, img_d, opt_in);
+
+        auto R_seed = opt_in.radius;
         auto& indices = seg.indices;
         const auto width = indices.width();
         const auto height = indices.height();
+
+        sli_world.resize(width, height);
+        sli_normal.resize(width, height);
+        for(int y=0; y<height; y++) {
+            for(int x=0; x<width; x++) {
+                auto pixel = seg.input(x,y);
+
+                for(int i=0; i<3; i++){
+                    sli_world(x,y)[i] = pixel.data.world(i);
+                    sli_normal(x,y)[i] = pixel.data.normal(i);
+                }
+            }
+        }
 
         std::vector<int> unique_id;
         for(int y=0; y<height; y++) {
@@ -249,11 +288,15 @@ int find(int idx, std::vector<Vertex>& vertices){
 
         std::vector<group_helper::Vertex> vertices;
         std::vector<group_helper::Edge> edges;
-        for(int i=0;i < unique_id.size();i++){
+        for(size_t i=0;i < unique_id.size();i++){
             group_helper::Vertex v;
             v.id = unique_id[i];
             v.idx = i;
             v.parent = i;
+            v.worlds.push_back(seg.superpixels[v.id].data.world);
+            v.normals.push_back(seg.superpixels[v.id].data.normal);
+            v.count = seg.superpixels[v.id].num;
+            v.children.push_back(i);
             vertices.push_back(v);
         }
 
@@ -298,15 +341,16 @@ int find(int idx, std::vector<Vertex>& vertices){
                     auto& normal1 = super1.data.normal;
                     auto& normal2 = super2.data.normal;
 
-                    auto center1_2 = (center1-center2);
+                    auto center1_2 = center1-center2;
                     bool isConvex = true;
                     auto convex_angle = center1_2.normalized().dot(normal1);
-                    if(convex_angle<-0.1){
+                    auto convex_angle2 = -center1_2.normalized().dot(normal2);
+                    if(convex_angle<-0.2f || convex_angle2<-0.2f){
                         isConvex = false;
                     }
-                    double weight =(1-std::abs(normal1.dot(normal2)));
-                    if(!isConvex || center1_2.norm()/R_seed>2){
-                            weight = 100;
+                    float weight =(1-std::abs(normal1.dot(normal2)));
+                    if(!isConvex || center1_2.norm()/R_seed>3){
+                        continue;  // don't want the edge
                     }
                     edge.weight = weight;
                     edges.push_back(edge);
@@ -316,46 +360,127 @@ int find(int idx, std::vector<Vertex>& vertices){
         std::sort(edges.begin(), edges.end());
 
         for(auto& edge: edges){
+            int v1 = edge.v1;
+            int v2 = edge.v2;
+            int idx1 = id2idx.find(v1)->second;
+            int idx2 = id2idx.find(v2)->second;
+            int parent1 = group_helper::find(idx1, vertices);
+            int parent2 = group_helper::find(idx2, vertices);
+            if(parent1!=parent2){
+                // weighted union find
+                if(vertices[parent1].count>vertices[parent2].count){
+                    int temp= parent1;
+                    parent1 = parent2;
+                    parent2 = temp;
+                }
+                if(edge.count>R_seed*400){
+                    // plane grouping
+                    if(edge.weight<0.02)
+                    {
+                        vertices[parent1].parent = parent2;
 
-            if(edge.weight<0.4 && edge.count>10)
-            {
-                int v1 = edge.v1;
-                int v2 = edge.v2;
-                int idx1 = id2idx.find(v1)->second;
-                int idx2 = id2idx.find(v2)->second;
-                int parent1 = group_helper::find(idx1, vertices);
-                int parent2 = group_helper::find(idx2, vertices);
-                if(parent1!=parent2){
-                    // weighted union find
-                    if(vertices[parent1].count>vertices[parent2].count){
-                        int temp= parent1;
-                        parent1 = parent2;
-                        parent2 = temp;
+                        vertices[parent2].worlds.insert(vertices[parent2].worlds.end(),
+                                                        vertices[parent1].worlds.begin(),
+                                                        vertices[parent1].worlds.end());
+                        vertices[parent2].normals.insert(vertices[parent2].normals.end(),
+                                                        vertices[parent1].normals.begin(),
+                                                        vertices[parent1].normals.end());
+                        vertices[parent2].children.insert(vertices[parent2].children.end(),
+                                                        vertices[parent1].children.begin(),
+                                                        vertices[parent1].children.end());
+                        vertices[parent2].count += vertices[parent1].count;
+
+                        adj_table(idx1,idx2) = 0;
+                        adj_table(idx2,idx1) = 0;
+                    }else{
+                        break;
                     }
-                    vertices[parent1].parent = parent2;
-                    vertices[parent2].count += vertices[parent1].count;
                 }
             }
         }
 
-        std::map<int, int> id2new;
-        int newid_size = 0;
-        for(int i=0;i<vertices.size();i++){
-            auto& v = vertices[i];
-            int parent = group_helper::find(v.idx, vertices);
-            if(parent==v.idx){
-                id2new[v.id] = newid_size;
-                newid_size++;
+        auto idx_sorted = group_helper::sort_indexes(vertices);
+        for(auto parent2: idx_sorted){
+            auto& v = vertices[parent2];
+            if(v.idx == v.parent){
+                // find adj segments
+                for(size_t child_idx=0;child_idx<v.children.size();child_idx++){
+                    size_t c = v.children[child_idx];
+                    for(size_t x=0; x<unique_id.size(); x++){
+                        if(c != x){
+                            if(adj_table(x, c) > R_seed*400){
+                                int parent1 = group_helper::find(x, vertices);
+                                if(parent2 != parent1){
+                                    int convex_check = 0;
+                                    int convex_thresh = 1;
+                                    for(int i=0; i<vertices[parent1].worlds.size(); i++){
+                                        auto& world1 = vertices[parent1].worlds[i];
+                                        auto& normal1 = vertices[parent1].normals[i];
+                                        for(int j=0; j<vertices[parent2].worlds.size(); j++){
+                                            auto& world2 = vertices[parent2].worlds[j];
+                                            auto& normal2 = vertices[parent2].normals[j];
+
+                                            auto center2_1 = (world2-world1).normalized();
+                                            auto convex_angle = center2_1.dot(normal2);
+                                            auto convex_angle2 = -center2_1.dot(normal1);
+                                            if(convex_angle<-0.1f || convex_angle2<-0.1f){
+                                                convex_check += 1;
+                                                if(convex_check>convex_thresh){
+                                                    break;
+                                                }
+                                            }
+                                        }
+                                        if(convex_check>convex_thresh){
+                                            break;
+                                        }
+                                    }
+                                    if(convex_check<=convex_thresh){
+                                        vertices[parent1].parent = parent2;
+                                        vertices[parent2].worlds.insert(vertices[parent2].worlds.end(),
+                                                                        vertices[parent1].worlds.begin(),
+                                                                        vertices[parent1].worlds.end());
+                                        vertices[parent2].normals.insert(vertices[parent2].normals.end(),
+                                                                        vertices[parent1].normals.begin(),
+                                                                        vertices[parent1].normals.end());
+                                        vertices[parent2].children.insert(vertices[parent2].children.end(),
+                                                                        vertices[parent1].children.begin(),
+                                                                        vertices[parent1].children.end());
+                                        vertices[parent2].count += vertices[parent1].count;
+                                    }
+                                }
+                                adj_table(x, c) = 0;
+                                adj_table(c, x) = 0;
+                            }
+                        }
+                    }
+                }
             }
         }
+
+
+        std::vector<int> segs_v;
+        std::vector<int> segs_count;
+        std::map<int, int> id2new;
         for(int i=0;i<vertices.size();i++){
             auto& v = vertices[i];
-            int parent = group_helper::find(v.idx, vertices);
-            int newid = id2new.find(vertices[parent].id)->second;
-            id2new[v.id] = newid;
+            if(v.parent==v.idx){
+                segs_v.push_back(i);
+                int count = 0;
+                for(auto c: v.children){
+                    count += vertices[c].count;
+                }
+                segs_count.push_back(count);
+            }
         }
+        auto count_sorted = group_helper::sort_indexes(segs_count);
 
         auto group = seg.indices;
+        for(int i=0; i<count_sorted.size();i++){
+            for(auto c: vertices[segs_v[count_sorted[i]]].children){
+                id2new[vertices[c].id] = i;
+            }
+        }
+
         for(int y=0; y<height; y++) {
             for(int x=0; x<width; x++) {
                 int i0 = group(x,y);

@@ -26,7 +26,7 @@ public:
             (clock_::now() - beg_).count(); }
     void out(std::string message = ""){
         double t = elapsed();
-        std::cout << message << "  elasped time:" << t << "s" << std::endl;
+        std::cout << message << ", elasped time:" << t << "s\n" << std::endl;
         reset();
     }
 private:
@@ -142,13 +142,38 @@ public:
 
     void train(const std::vector<Feature>& feats, const std::vector<Info>& infos
                ,const std::vector<int>& index);
-    bool Split(const std::vector<Feature>& feats, const std::vector<Info>& infos
-               , const std::vector<int>& ind_feats,
-               int& f_idx, std::vector<int>& lcind, std::vector<int>& rcind, float& simi_thresh);
     float info_gain(const std::vector<Info>& infos, const std::vector<int>& ind_feats,
                     const std::vector<int>& left,
-                    const std::vector<int>& right, const std::vector<float>& simis);
-    int predict(const std::vector<Feature> &feats, Feature& f);
+                    const std::vector<int>& right, const std::vector<float>& simis, int depth);
+
+
+    bool split_linemod(const std::vector<Feature>& feats, const std::vector<Info>& infos
+               , const std::vector<int>& ind_feats,
+               int& f_idx, std::vector<int>& lcind, std::vector<int>& rcind, float& simi_thresh, int depth);
+    int predict_linemod(const std::vector<Feature> &feats, const Feature& f) const;
+
+    template <typename ...Params>
+    bool split(std::string name, Params&&... params){
+        if(name == "linemod"){
+            return split_linemod(std::forward<Params>(params)...);
+        }else if(name == "cnn"){
+            CV_Error(cv::Error::StsBadArg, "not yet");
+        }
+        else{
+            CV_Error(cv::Error::StsBadArg, "unsupported feature type");
+        }
+    }
+
+    template <typename ...Params>
+    int predict(std::string name, Params&&... params) const{
+        if(name == "linemod"){
+            return predict_linemod(std::forward<Params>(params)...);
+        }else if(name == "cnn"){
+            CV_Error(cv::Error::StsBadArg, "not yet");
+        }else{
+            CV_Error(cv::Error::StsBadArg, "unsupported feature type");
+        }
+    }
 };
 
 template <class Feature>
@@ -157,13 +182,13 @@ public:
   std::vector<Tree<Feature> > trees;
   int max_numtrees_;
   double train_ratio_;
-  Forest(int max_numtrees=2, double train_ratio = 0.8){
+  Forest(int max_numtrees=5, double train_ratio = 0.8){
       max_numtrees_ = max_numtrees;
       trees.resize(max_numtrees_);
       train_ratio_ = train_ratio;
   }
   void Train(const std::vector<Feature>& feats, const std::vector<Info>& infos);
-  std::vector<int> Predict(const std::vector<Feature> &feats, Feature &f);
+  std::vector<int> Predict(const std::vector<Feature> &feats, const Feature &f) const;
 
   void write(lchf::Forest* forest){
       forest->set_max_numtrees(max_numtrees_);
@@ -200,12 +225,12 @@ void Tree<Feature>::train(const std::vector<Feature> &feats,const std::vector<In
     num_nodes_ = 1;
     num_leafnodes_ = 1;
 
-    bool stop = 0;
+    bool stop = false;
     int num_nodes = 1;
     int num_leafnodes = 1;
     std::vector<int> lcind,rcind;
-    int num_nodes_iter;
-    int num_split;
+    int num_nodes_iter = 0;
+    int num_split = 0;
     while(!stop){ // restart when we finish spliting old nodes
         num_nodes_iter = num_nodes_;
         nodes_.resize(num_nodes_*2+1);
@@ -217,10 +242,9 @@ void Tree<Feature>::train(const std::vector<Feature> &feats,const std::vector<In
                     nodes_[n].issplit = true;
                     nodes_[n].isleafnode = true;
                 }else{
-                    bool success = Split(feats, infos, nodes_[n].ind_feats,
+                    bool success = split(feats[0].name, feats, infos, nodes_[n].ind_feats,
                                          nodes_[n].split_feat_idx, lcind, rcind,
-                                            nodes_[n].simi_thresh);
-
+                                            nodes_[n].simi_thresh, nodes_[n].depth);
                     if(success){
                         nodes_[n].issplit = true;
                         nodes_[n].isleafnode = false;
@@ -255,7 +279,7 @@ void Tree<Feature>::train(const std::vector<Feature> &feats,const std::vector<In
             }
         }
         if (num_split == 0){  // no new node to split
-            stop = 1;
+            stop = true;
         }
         else{
             num_nodes_ = num_nodes;
@@ -277,10 +301,10 @@ void Tree<Feature>::train(const std::vector<Feature> &feats,const std::vector<In
 }
 
 template<class Feature>
-bool Tree<Feature>::Split(const std::vector<Feature> &feats, const std::vector<Info>& infos,
+bool Tree<Feature>::split_linemod(const std::vector<Feature> &feats, const std::vector<Info>& infos,
                           const std::vector<int>& ind_feats,
                            int& f_idx, std::vector<int> &lcind, std::vector<int> &rcind,
-                           float& simi_thresh)
+                           float& simi_thresh, int depth)
 {
     if(ind_feats.size()==0){
         f_idx = 0;
@@ -304,7 +328,7 @@ bool Tree<Feature>::Split(const std::vector<Feature> &feats, const std::vector<I
         auto rng = std::bind(dist, std::ref(engine));
         int select = rng();
 
-        // calculate simis using select with others
+        // calculate simis using selected one with others
         std::vector<float> simis(ind_feats.size(),0);
         for(int idx=0; idx<ind_feats.size(); idx++){
             if(select == idx){
@@ -325,7 +349,7 @@ bool Tree<Feature>::Split(const std::vector<Feature> &feats, const std::vector<I
         //  sort idx by comparing simis
         auto sidxs = lchf_helper::sort_indexes(simis);
         int sample_count = 0;
-        // we only want simi closer to sims center
+        // we only want simi closer to simis center
         for(int i=simis.size()/4;i<simis.size()*3/4;i++){
             dist_simis[sidxs[i]] = 1;
             sample_count++;
@@ -352,7 +376,7 @@ bool Tree<Feature>::Split(const std::vector<Feature> &feats, const std::vector<I
                 }
             }
 
-            float gain = info_gain(infos, ind_feats, left, right, simis);
+            float gain = info_gain(infos, ind_feats, left, right, simis, depth);
             if(gain > best_gain){
                 best_gain = gain;
                 best_simi = simis[sel_simi];
@@ -361,6 +385,7 @@ bool Tree<Feature>::Split(const std::vector<Feature> &feats, const std::vector<I
             }
             dist_simis[sel_simi] = 0;
         }
+
         if(best_gain>best_gain_all_feature){
             best_gain_all_feature = best_gain;
             best_simis_all_feature = best_simi;
@@ -394,9 +419,9 @@ template<class Feature>
 float Tree<Feature>::info_gain(const std::vector<Info>& infos,
                                const std::vector<int>& ind_feats,
                                const std::vector<int> &left,
-                               const std::vector<int> &right, const std::vector<float> &simis)
+                               const std::vector<int> &right, const std::vector<float> &simis, int depth)
 {
-    std::string type = "simis";
+    std::string type = "infos";
     if(type=="simis"){
         std::vector<float> left_simis, right_simis;
         for(auto idx: left){
@@ -405,6 +430,10 @@ float Tree<Feature>::info_gain(const std::vector<Info>& infos,
         for(auto idx: right){
             right_simis.push_back(simis[idx]);
         }
+
+        if(left_simis.empty() || right_simis.empty() || ind_feats.empty())
+            return 0;
+
         float left_w = float(left_simis.size())/(left_simis.size()+right_simis.size());
         float u1 = lchf_helper::getMean(left_simis);
         float u2 = lchf_helper::getMean(right_simis);
@@ -412,26 +441,66 @@ float Tree<Feature>::info_gain(const std::vector<Info>& infos,
         float var_reduce = left_w*(1-left_w)*(u1-u2)*(u1-u2);
         return var_reduce;
     }
-    if(type == "infos"){
-        std::vector<Info> left_infos, right_infos;
+    else if(type == "infos"){
+        std::vector<int> left_infos, right_infos;
         for(auto idx: left){
-            left_infos.push_back(std::move(infos[ind_feats[idx]]));
+            left_infos.push_back(ind_feats[idx]);
         }
         for(auto idx: right){
-            right_infos.push_back(std::move(infos[ind_feats[idx]]));
+            right_infos.push_back(ind_feats[idx]);
         }
+
+        if(left_infos.empty() || right_infos.empty() || ind_feats.empty())
+            return 0;
+
         // calculate some metrics here, greater is better
+
+        // refer to 3.2 info gain, rpy only
+        // Real Time Head Pose Estimation with Random Regression Forests
+        auto get_var = [&infos](std::vector<int> info_idxs){
+            float mean[3] = {0};
+            int num = info_idxs.size();
+            cv::Mat A = cv::Mat(num, 3, CV_32FC1, cv::Scalar(0));
+            for(int i=0; i<num; i++){
+                const auto& info = infos[info_idxs[i]];
+                for(int j=0; j<3; j++){
+                    mean[j] += info.rpy.at<float>(j,0);
+                    A.at<float>(i, j) = info.rpy.at<float>(j,0);
+                }
+            }
+            {
+                for(int j=0; j<3; j++){
+                    mean[j] /= info_idxs.size();
+                }
+                cv::Mat mean_mat = cv::Mat(1, 3, CV_32FC1,  mean);
+                cv::Mat ones = cv::Mat::ones(num, 1, CV_32FC1);
+
+                A = A - ones*mean_mat;
+            }
+
+            cv::Mat var = A.t()*A/double(num);
+            return var;
+        };
+        cv::Mat left_var = get_var(left_infos);
+        cv::Mat right_var = get_var(right_infos);
+        cv::Mat total_var = get_var(ind_feats);
+
+        auto var_value = [](cv::Mat& var){return std::log2(cv::determinant(var));};
+        float var_reduce = var_value(total_var) -
+                (left_infos.size() *var_value(left_var)+
+                 right_infos.size()*var_value(right_var))/infos.size();
+        return var_reduce;
     }
     return 0;
 }
 
 template<class Feature>
-int Tree<Feature>::predict(const std::vector<Feature> &feats, Feature &f)
+int Tree<Feature>::predict_linemod(const std::vector<Feature> &feats, const Feature &f) const
 {
-    auto& current = nodes_[0];
+    auto current = nodes_[0];
     int current_idx = 0;
     while(!current.isleafnode){
-        if(f.similarity(feats[current.split_feat_idx]) <= current.simi_thresh){
+        if(feats[current.split_feat_idx].similarity(f) <= current.simi_thresh){
             current_idx = current.cnodes[0];
             current = nodes_[current_idx];
         }else{
@@ -469,27 +538,31 @@ void Forest<Feature>::Train(const std::vector<Feature> &feats, const std::vector
 }
 
 template<class Feature>
-std::vector<int> Forest<Feature>::Predict(const std::vector<Feature> &feats, Feature &f)
+std::vector<int> Forest<Feature>::Predict(const std::vector<Feature> &feats, const Feature &f) const
 {
     std::vector<int> results;
     for(auto& tree: trees){
-        auto result = tree.predict(feats, f);
+        auto result = tree.predict(feats[0].name, feats, f);
         results.push_back(result);
     }
     return results;
 }
 
-class lchf_model {
-public:
-    Params params;
-    std::string path;
-    Forest<Linemod_feature> forest;
-    void train(const std::vector<Linemod_feature>& feats, const std::vector<Info>& infos);
-    std::vector<int> predict(const std::vector<Linemod_feature> &feats, Linemod_feature &f);
-    Forest<Linemod_feature> loadForest();
-    std::vector<Linemod_feature> loadFeatures();
-    std::vector<Info> loadCluster_infos();
-    void saveModel(Forest<Linemod_feature>& forest, std::vector<Linemod_feature>& features);
-    void saveInfos(std::vector<Info>& infos);
+namespace lchf_model {
+    Forest<Linemod_feature> train(const std::vector<Linemod_feature>& feats, const std::vector<Info>& infos);
+    std::vector<std::vector<int>> predict(const Forest<Linemod_feature>& forest, const std::vector<Linemod_feature> &templ_feats, const std::vector<Linemod_feature> &scene_feats);
+
+    std::vector<std::map<int, std::vector<int>>> getLeaf_feats_map(const Forest<Linemod_feature>& forest);
+
+    std::vector<Linemod_feature> get_feats_from_scene(cv::Mat& rgb, cv::Mat& depth, std::vector<std::vector<int>>& rois);
+
+    void saveForest(Forest<Linemod_feature>& forest, std::string path);
+    Forest<Linemod_feature> loadForest(std::string path);
+
+    void saveFeatures(std::vector<Linemod_feature>& features, std::string path);
+    std::vector<Linemod_feature> loadFeatures(std::string path);
+
+    void saveInfos(std::vector<Info>& infos, std::string path);
+    std::vector<Info> loadInfos(std::string path);
 };
 #endif
